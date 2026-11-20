@@ -49,6 +49,9 @@
     <label>하얗게 <span class="val" id="v-white">40%</span>
       <input type="range" id="white" min="0" max="100" value="40">
     </label>
+    <label>이빨 개수 <span class="val" id="v-teeth">6개</span>
+      <input type="range" id="teeth" min="4" max="10" step="2" value="6">
+    </label>
     <button id="save" disabled>💾 저장하기</button>
     <div class="note">
       얼굴 인식은 브라우저 안에서만 처리되며 사진은 어디로도 전송되지 않습니다.<br>
@@ -134,7 +137,8 @@ function opts() {
     width: +document.getElementById('width').value,
     height: +document.getElementById('height').value,
     offset: +document.getElementById('offset').value,
-    white: +document.getElementById('white').value
+    white: +document.getElementById('white').value,
+    teeth: +document.getElementById('teeth').value
   };
 }
 
@@ -142,73 +146,138 @@ function readLm(lm, W, H, i) {
   return { x: lm[i].x * W, y: lm[i].y * H };
 }
 
+function curveYAt(top, x, yOff) {
+  if (x <= top[0].x) return top[0].y + yOff;
+  for (let i = 0; i < top.length - 1; i++) {
+    const a = top[i], b = top[i + 1];
+    if (x >= a.x && x <= b.x) {
+      const fr = b.x === a.x ? 0 : (x - a.x) / (b.x - a.x);
+      return a.y + (b.y - a.y) * fr + yOff;
+    }
+  }
+  return top[top.length - 1].y + yOff;
+}
+
+function drawTooth(x0, x1, ytl, ytr, ybl, ybr, tw, wl, outer) {
+  const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+  const rTop = tw * 0.18;
+  const rBot = tw * 0.30;
+  const taper = tw * 0.07;
+  const xb0 = x0 + taper, xb1 = x1 - taper;
+  const dip = tw * (outer ? 0.28 : 0.10);
+  const midX = (xb0 + xb1) / 2;
+  const ybMid = Math.max(ybl, ybr) + dip;
+
+  ctx.beginPath();
+  ctx.moveTo(x0 + rTop, ytl);
+  ctx.lineTo(x1 - rTop, ytr);
+  ctx.quadraticCurveTo(x1, ytr, x1, ytr + rTop);
+  ctx.lineTo(xb1, ybr - rBot);
+  ctx.quadraticCurveTo(xb1, ybr, midX, ybMid);
+  ctx.quadraticCurveTo(xb0, ybl, xb0, ybl - rBot);
+  ctx.lineTo(x0, ytl + rTop);
+  ctx.quadraticCurveTo(x0, ytl, x0 + rTop, ytl);
+  ctx.closePath();
+
+  const g = ctx.createLinearGradient(0, Math.min(ytl, ytr), 0, ybMid);
+  g.addColorStop(0, `rgb(${mix([221, 198, 162], [240, 234, 222], wl).join(',')})`);
+  g.addColorStop(0.45, `rgb(${mix([243, 238, 227], [255, 255, 255], wl * 0.85).join(',')})`);
+  g.addColorStop(1, `rgb(${mix([250, 250, 247], [255, 255, 255], wl).join(',')})`);
+  ctx.fillStyle = g;
+  ctx.fill();
+
+  const eg = ctx.createLinearGradient(x0, 0, x1, 0);
+  eg.addColorStop(0, 'rgba(120,95,70,0.18)');
+  eg.addColorStop(0.18, 'rgba(0,0,0,0)');
+  eg.addColorStop(0.82, 'rgba(0,0,0,0)');
+  eg.addColorStop(1, 'rgba(120,95,70,0.18)');
+  ctx.fillStyle = eg;
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(110,88,62,0.35)';
+  ctx.lineWidth = Math.max(1, tw * 0.05);
+  ctx.stroke();
+
+  if (!outer) {
+    ctx.save();
+    ctx.clip();
+    const hx = (x0 + x1) / 2;
+    const hl = ctx.createLinearGradient(hx - tw * 0.28, 0, hx + tw * 0.28, 0);
+    hl.addColorStop(0, 'rgba(255,255,255,0)');
+    hl.addColorStop(0.5, 'rgba(255,255,255,0.22)');
+    hl.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = hl;
+    ctx.fillRect(hx - tw * 0.28, Math.min(ytl, ytr), tw * 0.56, (ybMid - Math.min(ytl, ytr)) * 0.75);
+    ctx.restore();
+  }
+}
+
 function drawTeeth(lm, W, H, o) {
   const L = readLm(lm, W, H, 61);
   const R = readLm(lm, W, H, 291);
-  const mw = Math.hypot(R.x - L.x, R.y - L.y);
-  if (mw < 8) return;
+  const aw = Math.abs(R.x - L.x);
+  if (aw < 8) return;
   const cx = (L.x + R.x) / 2;
   const ws = o.width / 100;
+  const yOff = aw * (o.offset / 100) * 0.6;
+  const hUnit = aw * 0.22 * (o.height / 100);
   const top = TOP_TEETH_IDX.map((i) => readLm(lm, W, H, i))
     .map((p) => ({ x: cx + (p.x - cx) * ws, y: p.y }));
 
-  const yOff = mw * (o.offset / 100) * 0.6;
-  const h = mw * 0.25 * (o.height / 100);
-
+  const yTopMid = curveYAt(top, cx, yOff);
   const yL = L.y + yOff;
   const yR = R.y + yOff;
   const yMid = (yL + yR) / 2;
-  const yBot = yMid + h;
-  const ctrlY = yMid + h * 1.3;
-  const inset = Math.abs(R.x - L.x) * 0.05;
+  const yBot = yMid + hUnit * 1.9;
+  const inset = aw * 0.05;
   const bx0 = L.x + inset;
   const bx1 = R.x - inset;
 
-  const t = (u, key) => {
-    const f = Math.min(Math.max(u, 0), 1) * (top.length - 1);
-    const i = Math.floor(f);
-    const fr = f - i;
-    const a = top[i], b = top[Math.min(i + 1, top.length - 1)];
-    return a[key] + (b[key] - a[key]) * fr;
-  };
-
+  ctx.save();
   ctx.beginPath();
   ctx.moveTo(L.x, yL);
   for (const p of top) ctx.lineTo(p.x, p.y + yOff);
   ctx.lineTo(R.x, yR);
   ctx.lineTo(bx1, yBot);
-  ctx.quadraticCurveTo(cx, ctrlY, bx0, yBot);
+  ctx.quadraticCurveTo(cx, yBot + hUnit * 0.25, bx0, yBot);
   ctx.closePath();
+  ctx.clip();
 
   const wl = o.white / 100;
-  const mix = (a, b, k) => a.map((v, i) => Math.round(v + (b[i] - v) * k));
-  const cTop = mix([240, 233, 214], [255, 255, 255], Math.min(1, wl + 0.2));
-  const cBot = mix([212, 201, 178], [250, 248, 242], wl);
-  const grad = ctx.createLinearGradient(0, yMid - mw * 0.05, 0, yBot);
-  grad.addColorStop(0, `rgb(${cTop.join(',')})`);
-  grad.addColorStop(1, `rgb(${cBot.join(',')})`);
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  ctx.save();
-  ctx.clip();
-  ctx.strokeStyle = 'rgba(70,55,40,0.28)';
-  ctx.lineWidth = Math.max(1, mw * 0.006);
-  ctx.beginPath();
-  const n = 8;
-  for (let k = 1; k < n; k++) {
-    const u = k / n;
-    const x = t(u, 'x');
-    const x0 = cx + (x - cx) * ws;
-    ctx.moveTo(x0, t(u, 'y') + yOff + mw * 0.01);
-    ctx.lineTo(x0, yBot + 2 * u * (1 - u) * (ctrlY - yBot));
+  const n = o.teeth;
+  const half = n / 2;
+  const W_SEQ = [1, 0.74, 0.88, 0.68, 0.8];
+  const H_SEQ = [1, 0.92, 0.84, 0.74, 0.66];
+  const relW = [], relH = [];
+  for (let k = 0; k < n; k++) {
+    const j = Math.min(k < half ? k : n - 1 - k, W_SEQ.length - 1);
+    relW.push(W_SEQ[j]);
+    relH.push(H_SEQ[j]);
   }
-  ctx.stroke();
-  ctx.restore();
+  const total = relW.reduce((a, b) => a + b, 0);
+  const span = aw * 0.94 * ws;
+  const gap = span * 0.004;
+  let s = cx - span / 2;
 
-  ctx.strokeStyle = 'rgba(0,0,0,0.08)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
+  for (let k = 0; k < n; k++) {
+    const tw = relW[k] / total * span - gap;
+    const x0 = s + gap / 2, x1 = x0 + tw;
+    s += relW[k] / total * span;
+    const len = hUnit * relH[k];
+    const ytl = curveYAt(top, x0, yOff);
+    const ytr = curveYAt(top, x1, yOff);
+    const ybl = ytl + len, ybr = ytr + len;
+    const outer = (k === 0 || k === n - 1);
+    drawTooth(x0, x1, ytl, ytr, ybl, ybr, tw, wl, outer);
+  }
+
+  const sh = ctx.createLinearGradient(0, yTopMid - aw * 0.25, 0, yTopMid + hUnit * 0.55);
+  sh.addColorStop(0, 'rgba(95,70,45,0.30)');
+  sh.addColorStop(1, 'rgba(95,70,45,0)');
+  ctx.fillStyle = sh;
+  ctx.fillRect(cx - span / 2 - 2, yTopMid - aw * 0.25, span + 4, hUnit * 1.2);
+
+  ctx.restore();
 }
 
 function render() {
@@ -241,7 +310,8 @@ window.addEventListener('paste', (e) => {
 [['width', 'v-width', (v) => v + '%'],
  ['height', 'v-height', (v) => v + '%'],
  ['offset', 'v-offset', (v) => (v > 0 ? '+' : '') + v],
- ['white', 'v-white', (v) => v + '%']].forEach(([id, label, fmt]) => {
+ ['white', 'v-white', (v) => v + '%'],
+ ['teeth', 'v-teeth', (v) => v + '개']].forEach(([id, label, fmt]) => {
   const el = document.getElementById(id);
   const out = document.getElementById(label);
   el.addEventListener('input', () => { out.textContent = fmt(el.value); render(); });
