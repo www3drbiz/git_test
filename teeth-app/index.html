@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>🦷 치아 붙이기</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+<style>
+  :root { --bg:#12141a; --panel:#1b1e27; --line:#2a2f3d; --txt:#e8eaf0; --sub:#9aa0b0; --acc:#6ea8fe; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:"Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif; background:var(--bg); color:var(--txt); }
+  h1 { font-size:20px; margin:18px; }
+  .wrap { display:flex; gap:18px; padding:0 18px 24px; flex-wrap:wrap; }
+  .stage { position:relative; flex:1 1 520px; min-width:320px; text-align:center; }
+  canvas { max-width:100%; max-height:75vh; border-radius:12px; background:#0c0d11; border:1px solid var(--line); }
+  #status { position:absolute; top:10px; left:50%; transform:translateX(-50%); background:rgba(10,12,18,.8); border:1px solid var(--line); padding:6px 14px; border-radius:999px; font-size:13px; color:var(--sub); pointer-events:none; }
+  .drop { position:absolute; inset:0; border:2px dashed var(--acc); border-radius:12px; background:rgba(110,168,254,.08); display:none; align-items:center; justify-content:center; font-size:16px; color:var(--acc); }
+  .panel { flex:0 0 280px; background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:16px; display:flex; flex-direction:column; gap:14px; }
+  .filebtn { display:block; text-align:center; background:var(--acc); color:#0c1017; font-weight:700; padding:11px; border-radius:10px; cursor:pointer; }
+  .hint { font-size:12px; color:var(--sub); margin:0; text-align:center; }
+  .panel label { display:flex; flex-direction:column; gap:6px; font-size:13px; }
+  .panel label span.val { color:var(--acc); float:right; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  button#save { background:#2b6cb0; border:none; color:#fff; font-weight:700; padding:11px; border-radius:10px; cursor:pointer; }
+  button#save:disabled { opacity:.4; cursor:not-allowed; }
+  .note { font-size:11px; color:var(--sub); line-height:1.5; }
+</style>
+</head>
+<body>
+<h1>🦷 치아 붙이기</h1>
+<div class="wrap">
+  <div class="stage">
+    <canvas id="canvas" width="800" height="600"></canvas>
+    <div id="status">사진을 불러오세요</div>
+    <div class="drop" id="drop">여기에 사진을 놓으세요</div>
+  </div>
+  <div class="panel">
+    <label class="filebtn">📁 사진 선택<input type="file" id="file" accept="image/*" hidden></label>
+    <p class="hint">사진을 끌어다 놓거나 Ctrl+V 로 붙여넣을 수 있어요</p>
+    <label>너비 <span class="val" id="v-width">100%</span>
+      <input type="range" id="width" min="40" max="120" value="100">
+    </label>
+    <label>길이 <span class="val" id="v-height">100%</span>
+      <input type="range" id="height" min="20" max="200" value="100">
+    </label>
+    <label>위 / 아래 <span class="val" id="v-offset">0</span>
+      <input type="range" id="offset" min="-60" max="120" value="0">
+    </label>
+    <label>하얗게 <span class="val" id="v-white">40%</span>
+      <input type="range" id="white" min="0" max="100" value="40">
+    </label>
+    <label>이빨 개수 <span class="val" id="v-teeth">6개</span>
+      <input type="range" id="teeth" min="4" max="10" step="2" value="6">
+    </label>
+    <button id="save" disabled>💾 저장하기</button>
+    <div class="note">
+      얼굴 인식은 브라우저 안에서만 처리되며 사진은 어디로도 전송되지 않습니다.<br>
+      얼굴 인식 모델은 처음 실행 시 CDN에서 내려받으므로 인터넷 연결이 필요합니다.
+    </div>
+  </div>
+</div>
+
+<script>
+const cv = document.getElementById('canvas');
+const ctx = cv.getContext('2d');
+const statusEl = document.getElementById('status');
+const dropEl = document.getElementById('drop');
+const saveBtn = document.getElementById('save');
+
+let base = null;
+let faces = [];
+let pendingResolve = null;
+
+const faceMesh = new FaceMesh({
+  locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`
+});
+faceMesh.setOptions({
+  maxNumFaces: 5,
+  refineLandmarks: false,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
+faceMesh.onResults((res) => {
+  faces = res.multiFaceLandmarks || [];
+  if (pendingResolve) { pendingResolve(); pendingResolve = null; }
+});
+
+function setStatus(t) { statusEl.textContent = t; }
+
+async function loadFromBlob(blob) {
+  const url = URL.createObjectURL(blob);
+  try {
+    const img = await new Promise((ok, err) => {
+      const im = new Image();
+      im.onload = () => ok(im);
+      im.onerror = err;
+      im.src = url;
+    });
+    await setImage(img);
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function setImage(img) {
+  const max = 1800;
+  const scale = Math.min(1, max / Math.max(img.width, img.height));
+  base = document.createElement('canvas');
+  base.width = Math.round(img.width * scale);
+  base.height = Math.round(img.height * scale);
+  base.getContext('2d').drawImage(img, 0, 0, base.width, base.height);
+  cv.width = base.width;
+  cv.height = base.height;
+  saveBtn.disabled = false;
+  setStatus('얼굴 인식 중...');
+  faces = [];
+  await new Promise((resolve) => {
+    pendingResolve = resolve;
+    faceMesh.send({ image: base }).catch((e) => {
+      console.error(e);
+      setStatus('얼굴 인식 모델을 불러오지 못했습니다. 인터넷 연결을 확인하세요.');
+      if (pendingResolve) { pendingResolve(); pendingResolve = null; }
+    });
+  });
+  if (faces.length === 0) {
+    setStatus('얼굴을 찾지 못했어요. 정면 사진을 사용해 보세요 📷');
+  } else {
+    setStatus(`얼굴 ${faces.length}개 인식 완료 🦷`);
+  }
+  render();
+}
+
+const TOP_TEETH_IDX = [78, 191, 80, 81, 82, 13, 312, 311, 310, 415, 308];
+
+function opts() {
+  return {
+    width: +document.getElementById('width').value,
+    height: +document.getElementById('height').value,
+    offset: +document.getElementById('offset').value,
+    white: +document.getElementById('white').value,
+    teeth: +document.getElementById('teeth').value
+  };
+}
+
+function readLm(lm, W, H, i) {
+  return { x: lm[i].x * W, y: lm[i].y * H };
+}
+
+function curveYAt(top, x, yOff) {
+  if (x <= top[0].x) return top[0].y + yOff;
+  for (let i = 0; i < top.length - 1; i++) {
+    const a = top[i], b = top[i + 1];
+    if (x >= a.x && x <= b.x) {
+      const fr = b.x === a.x ? 0 : (x - a.x) / (b.x - a.x);
+      return a.y + (b.y - a.y) * fr + yOff;
+    }
+  }
+  return top[top.length - 1].y + yOff;
+}
+
+function drawTooth(x0, x1, ytl, ytr, ybl, ybr, tw, wl, outer) {
+  const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+  const rTop = tw * 0.18;
+  const rBot = tw * 0.30;
+  const taper = tw * 0.07;
+  const xb0 = x0 + taper, xb1 = x1 - taper;
+  const dip = tw * (outer ? 0.28 : 0.10);
+  const midX = (xb0 + xb1) / 2;
+  const ybMid = Math.max(ybl, ybr) + dip;
+
+  ctx.beginPath();
+  ctx.moveTo(x0 + rTop, ytl);
+  ctx.lineTo(x1 - rTop, ytr);
+  ctx.quadraticCurveTo(x1, ytr, x1, ytr + rTop);
+  ctx.lineTo(xb1, ybr - rBot);
+  ctx.quadraticCurveTo(xb1, ybr, midX, ybMid);
+  ctx.quadraticCurveTo(xb0, ybl, xb0, ybl - rBot);
+  ctx.lineTo(x0, ytl + rTop);
+  ctx.quadraticCurveTo(x0, ytl, x0 + rTop, ytl);
+  ctx.closePath();
+
+  const g = ctx.createLinearGradient(0, Math.min(ytl, ytr), 0, ybMid);
+  g.addColorStop(0, `rgb(${mix([221, 198, 162], [240, 234, 222], wl).join(',')})`);
+  g.addColorStop(0.45, `rgb(${mix([243, 238, 227], [255, 255, 255], wl * 0.85).join(',')})`);
+  g.addColorStop(1, `rgb(${mix([250, 250, 247], [255, 255, 255], wl).join(',')})`);
+  ctx.fillStyle = g;
+  ctx.fill();
+
+  const eg = ctx.createLinearGradient(x0, 0, x1, 0);
+  eg.addColorStop(0, 'rgba(120,95,70,0.18)');
+  eg.addColorStop(0.18, 'rgba(0,0,0,0)');
+  eg.addColorStop(0.82, 'rgba(0,0,0,0)');
+  eg.addColorStop(1, 'rgba(120,95,70,0.18)');
+  ctx.fillStyle = eg;
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(110,88,62,0.35)';
+  ctx.lineWidth = Math.max(1, tw * 0.05);
+  ctx.stroke();
+
+  if (!outer) {
+    ctx.save();
+    ctx.clip();
+    const hx = (x0 + x1) / 2;
+    const hl = ctx.createLinearGradient(hx - tw * 0.28, 0, hx + tw * 0.28, 0);
+    hl.addColorStop(0, 'rgba(255,255,255,0)');
+    hl.addColorStop(0.5, 'rgba(255,255,255,0.22)');
+    hl.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = hl;
+    ctx.fillRect(hx - tw * 0.28, Math.min(ytl, ytr), tw * 0.56, (ybMid - Math.min(ytl, ytr)) * 0.75);
+    ctx.restore();
+  }
+}
+
+function drawTeeth(lm, W, H, o) {
+  const L = readLm(lm, W, H, 61);
+  const R = readLm(lm, W, H, 291);
+  const aw = Math.abs(R.x - L.x);
+  if (aw < 8) return;
+  const cx = (L.x + R.x) / 2;
+  const ws = o.width / 100;
+  const yOff = aw * (o.offset / 100) * 0.6;
+  const hUnit = aw * 0.22 * (o.height / 100);
+  const top = TOP_TEETH_IDX.map((i) => readLm(lm, W, H, i))
+    .map((p) => ({ x: cx + (p.x - cx) * ws, y: p.y }));
+
+  const yTopMid = curveYAt(top, cx, yOff);
+  const yL = L.y + yOff;
+  const yR = R.y + yOff;
+  const yMid = (yL + yR) / 2;
+  const yBot = yMid + hUnit * 1.9;
+  const inset = aw * 0.05;
+  const bx0 = L.x + inset;
+  const bx1 = R.x - inset;
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(L.x, yL);
+  for (const p of top) ctx.lineTo(p.x, p.y + yOff);
+  ctx.lineTo(R.x, yR);
+  ctx.lineTo(bx1, yBot);
+  ctx.quadraticCurveTo(cx, yBot + hUnit * 0.25, bx0, yBot);
+  ctx.closePath();
+  ctx.clip();
+
+  const wl = o.white / 100;
+  const n = o.teeth;
+  const half = n / 2;
+  const W_SEQ = [1, 0.74, 0.88, 0.68, 0.8];
+  const H_SEQ = [1, 0.92, 0.84, 0.74, 0.66];
+  const relW = [], relH = [];
+  for (let k = 0; k < n; k++) {
+    const j = Math.min(k < half ? k : n - 1 - k, W_SEQ.length - 1);
+    relW.push(W_SEQ[j]);
+    relH.push(H_SEQ[j]);
+  }
+  const total = relW.reduce((a, b) => a + b, 0);
+  const span = aw * 0.94 * ws;
+  const gap = span * 0.004;
+  let s = cx - span / 2;
+
+  for (let k = 0; k < n; k++) {
+    const tw = relW[k] / total * span - gap;
+    const x0 = s + gap / 2, x1 = x0 + tw;
+    s += relW[k] / total * span;
+    const len = hUnit * relH[k];
+    const ytl = curveYAt(top, x0, yOff);
+    const ytr = curveYAt(top, x1, yOff);
+    const ybl = ytl + len, ybr = ytr + len;
+    const outer = (k === 0 || k === n - 1);
+    drawTooth(x0, x1, ytl, ytr, ybl, ybr, tw, wl, outer);
+  }
+
+  const sh = ctx.createLinearGradient(0, yTopMid - aw * 0.25, 0, yTopMid + hUnit * 0.55);
+  sh.addColorStop(0, 'rgba(95,70,45,0.30)');
+  sh.addColorStop(1, 'rgba(95,70,45,0)');
+  ctx.fillStyle = sh;
+  ctx.fillRect(cx - span / 2 - 2, yTopMid - aw * 0.25, span + 4, hUnit * 1.2);
+
+  ctx.restore();
+}
+
+function render() {
+  if (!base) return;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(base, 0, 0);
+  const o = opts();
+  for (const lm of faces) drawTeeth(lm, cv.width, cv.height, o);
+}
+
+document.getElementById('file').addEventListener('change', (e) => {
+  if (e.target.files[0]) loadFromBlob(e.target.files[0]);
+});
+
+const stage = document.querySelector('.stage');
+['dragenter', 'dragover'].forEach((ev) =>
+  stage.addEventListener(ev, (e) => { e.preventDefault(); dropEl.style.display = 'flex'; }));
+['dragleave', 'drop'].forEach((ev) =>
+  stage.addEventListener(ev, (e) => { e.preventDefault(); dropEl.style.display = 'none'; }));
+stage.addEventListener('drop', (e) => {
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) loadFromBlob(f);
+});
+
+window.addEventListener('paste', (e) => {
+  const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith('image/'));
+  if (item) loadFromBlob(item.getAsFile());
+});
+
+[['width', 'v-width', (v) => v + '%'],
+ ['height', 'v-height', (v) => v + '%'],
+ ['offset', 'v-offset', (v) => (v > 0 ? '+' : '') + v],
+ ['white', 'v-white', (v) => v + '%'],
+ ['teeth', 'v-teeth', (v) => v + '개']].forEach(([id, label, fmt]) => {
+  const el = document.getElementById(id);
+  const out = document.getElementById(label);
+  el.addEventListener('input', () => { out.textContent = fmt(el.value); render(); });
+});
+
+saveBtn.addEventListener('click', () => {
+  const a = document.createElement('a');
+  a.download = 'teeth.png';
+  a.href = cv.toDataURL('image/png');
+  a.click();
+});
+</script>
+</body>
+</html>
